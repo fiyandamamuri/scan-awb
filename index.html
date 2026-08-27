@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Ekstrak No. AWB dari PDF CORESYS menjadi Excel langsung di browser." />
+  <title>PDF AWB Extractor</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <span class="eyebrow">PDF → EXCEL</span>
+        <h1>AWB Extractor</h1>
+        <p class="subtitle">Upload PDF Trace & Tracking, ambil kode pada kolom <strong>No. AWB</strong>, lalu download Excel.</p>
+      </div>
+      <div class="privacy-badge">Diproses di browser</div>
+    </section>
+
+    <section class="card upload-card">
+      <label id="dropZone" class="drop-zone" for="pdfInput">
+        <input id="pdfInput" type="file" accept="application/pdf,.pdf" hidden />
+        <div class="upload-icon">PDF</div>
+        <div>
+          <strong>Pilih atau drop file PDF di sini</strong>
+          <span>Maksimal yang disarankan: ±20 halaman per proses</span>
+        </div>
+      </label>
+
+      <div class="options">
+        <label class="switch-row">
+          <input id="removeQ" type="checkbox" checked />
+          <span>Hapus huruf <strong>Q</strong> di awal AWB</span>
+        </label>
+        <label class="switch-row">
+          <input id="dedupe" type="checkbox" checked />
+          <span>Hapus AWB duplikat</span>
+        </label>
+      </div>
+
+      <div id="fileInfo" class="file-info hidden"></div>
+
+      <button id="extractBtn" class="primary" disabled>Proses PDF</button>
+
+      <div id="progressWrap" class="progress-wrap hidden">
+        <div class="progress-meta">
+          <span id="progressText">Menyiapkan...</span>
+          <span id="progressPct">0%</span>
+        </div>
+        <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+      </div>
+
+      <div id="statusBox" class="status hidden"></div>
+    </section>
+
+    <section id="resultCard" class="card hidden">
+      <div class="result-head">
+        <div>
+          <span class="eyebrow">HASIL</span>
+          <h2><span id="resultCount">0</span> AWB ditemukan</h2>
+        </div>
+        <button id="downloadBtn" class="primary">Download Excel</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>No. AWB</th>
+            </tr>
+          </thead>
+          <tbody id="resultBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="note">
+      <strong>Catatan:</strong> aplikasi memakai OCR karena PDF hasil export/print dapat berupa gambar. Proses dilakukan lokal di browser; file PDF tidak dikirim ke server aplikasi ini.
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
