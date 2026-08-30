@@ -1,4 +1,4 @@
-/* global pdfjsLib, Tesseract, XLSX */
+/* global pdfjsLib, XLSX */
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -99,14 +99,8 @@ async function processPdf() {
 
       const page = await pdf.getPage(pageNo);
 
-      // 1. Ekstrak langsung kode AWB dari struktur digital PDF
-      let pageFound = await extractAwbDirect(page);
-
-      // 2. Jika tidak ditemukan teks digital sama sekali (PDF scan gambar murni), beralih ke OCR Tesseract
-      if (!pageFound.length && typeof Tesseract !== "undefined") {
-        pageFound = await extractAwbViaOcr(page, pageNo, pdf.numPages);
-      }
-
+      // Ekstrak langsung kode AWB dari struktur digital PDF (Instant 0.1 Detik)
+      const pageFound = await extractAwbDirect(page);
       allFound.push(...pageFound);
 
       const pct = Math.round((pageNo / pdf.numPages) * 100);
@@ -147,7 +141,7 @@ async function processPdf() {
   }
 }
 
-// Ekstraksi langsung kode AWB dari PDF (Annotation Link & Teks Digital PDF.js)
+// Ekstraksi langsung kode AWB dari PDF (Hyperlink Link & Teks Digital PDF.js)
 async function extractAwbDirect(page) {
   const found = [];
 
@@ -169,7 +163,7 @@ async function extractAwbDirect(page) {
     const textContent = await page.getTextContent();
     const items = textContent.items.map((item) => item.str);
     
-    // B1. Gabung TANPA spasi (mencegah pemisahan token detail_ awb / 8161056...)
+    // B1. Gabung TANPA spasi (menangani token terpisah seperti detail_ awb / 8161056...)
     const rawNoSpaces = items.map((s) => s.trim()).join("");
     const regexNoSpaces = /detail[_\-\s]*awb[_\-\s\/\:\-]*([A-Z0-9]{3,20})/gi;
     let m;
@@ -177,14 +171,14 @@ async function extractAwbDirect(page) {
       found.push(m[1]);
     }
 
-    // B2. Gabung DENGAN spasi (pencarian fleksibel)
+    // B2. Gabung DENGAN spasi
     const rawWithSpaces = items.join(" ");
     const regexWithSpaces = /detail[_\-\s]*awb[_\-\s\/\:\-]*([A-Z0-9]{3,20})/gi;
     while ((m = regexWithSpaces.exec(rawWithSpaces)) !== null) {
       found.push(m[1]);
     }
 
-    // B3. Ambil kode yang diawali huruf Q pada sel tabel (contoh Q8161056107366 atau QCGK8161070900011)
+    // B3. Ambil kode berawalan Q di sel tabel (Q8161056107366 / QCGK8161070900011)
     const qAwbRegex = /\bQ([A-Z0-9]{3,18})\b/g;
     while ((m = qAwbRegex.exec(rawWithSpaces)) !== null) {
       found.push(m[1]);
@@ -194,82 +188,6 @@ async function extractAwbDirect(page) {
   }
 
   return found;
-}
-
-// Fallback OCR Tesseract untuk PDF berbasis scan gambar murni
-async function extractAwbViaOcr(page, pageNo, totalPages) {
-  const viewport = page.getViewport({ scale: 2.25 });
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
-  canvas.width = Math.ceil(viewport.width);
-  canvas.height = Math.ceil(viewport.height);
-
-  await page.render({ canvasContext: ctx, viewport }).promise;
-
-  const result = await Tesseract.recognize(canvas, "eng", {
-    logger: (m) => {
-      if (m.status === "recognizing text" && typeof m.progress === "number") {
-        const pageBase = (pageNo - 1) / totalPages;
-        const pagePart = m.progress / totalPages;
-        const pct = Math.min(98, Math.round((pageBase + pagePart) * 100));
-        setProgress(pct, `OCR halaman ${pageNo}/${totalPages}...`);
-      }
-    },
-  });
-
-  const rawText = result.data.text || "";
-  return extractAwbFromOcr(rawText);
-}
-
-function extractAwbFromOcr(rawText) {
-  const text = String(rawText || "")
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201C\u201D]/g, '"')
-    .toUpperCase();
-
-  const found = [];
-
-  const urlRegex = /(?:DETAIL|DETALL|DETA1L|DEIAIL)\s*[_\- ]?\s*AWB\s*[\\/]\s*([A-Z0-9]+)/g;
-  let match;
-  while ((match = urlRegex.exec(text)) !== null) {
-    found.push(match[1]);
-  }
-
-  const looseUrlRegex = /(?:DETAIL|DETALL|DETA1L|DEIAIL)\s*[_\- ]?\s*AWB[^A-Z0-9]{0,10}([A-Z0-9]+)/g;
-  while ((match = looseUrlRegex.exec(text)) !== null) {
-    found.push(match[1]);
-  }
-
-  if (!found.length) {
-    const tableText = sliceAfterAwbHeader(text);
-    const lines = tableText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-
-    for (const line of lines) {
-      if (/DETAIL|CORESYS|ONLINE|HTTPS/i.test(line)) {
-        const candidates = line.match(/\b(Q?[A-Z0-9]+)\b/g) || [];
-        for (const cand of candidates) {
-          if (cand.length <= 18 && !/^(HTTPS|ONLINE|CORESYS|DETAIL|TRACKING|NO|AWB)/i.test(cand)) {
-            found.push(cand);
-          }
-        }
-      }
-    }
-  }
-
-  return found;
-}
-
-function sliceAfterAwbHeader(text) {
-  const variants = ["NO. AWB", "NO AWB", "NO, AWB", "NO.AWB"];
-  let bestIndex = -1;
-
-  for (const variant of variants) {
-    const index = text.lastIndexOf(variant);
-    if (index > bestIndex) bestIndex = index;
-  }
-
-  return bestIndex >= 0 ? text.slice(bestIndex) : text;
 }
 
 function cleanCandidate(value) {
