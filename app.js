@@ -92,30 +92,21 @@ async function processPdf() {
     const allFound = [];
 
     for (let pageNo = 1; pageNo <= pdf.numPages; pageNo += 1) {
+      setProgress(
+        Math.round(((pageNo - 1) / pdf.numPages) * 100),
+        `Mengekstrak halaman ${pageNo}/${pdf.numPages}...`
+      );
+
       const page = await pdf.getPage(pageNo);
-      const viewport = page.getViewport({ scale: 2.25 });
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-      canvas.width = Math.ceil(viewport.width);
-      canvas.height = Math.ceil(viewport.height);
+      // 1. Ekstrak langsung dari struktur digital PDF (link & teks) - Instant & 100% Akurat
+      let pageFound = await extractAwbDirect(page);
 
-      await page.render({ canvasContext: ctx, viewport }).promise;
+      // 2. Jika tidak ditemukan teks digital (PDF scan gambar murni), beralih ke OCR Tesseract
+      if (!pageFound.length) {
+        pageFound = await extractAwbViaOcr(page, pageNo, pdf.numPages);
+      }
 
-      // OCR satu halaman penuh. Format CORESYS menampilkan AWB dan URL /detail_awb/<kode>,
-      // sehingga URL dipakai sebagai sumber utama karena paling aman dari kolom No. Reference.
-      const result = await Tesseract.recognize(canvas, "eng", {
-        logger: (m) => {
-          if (m.status === "recognizing text" && typeof m.progress === "number") {
-            const pageBase = (pageNo - 1) / pdf.numPages;
-            const pagePart = m.progress / pdf.numPages;
-            const pct = Math.min(98, Math.round((pageBase + pagePart) * 100));
-            setProgress(pct, `OCR halaman ${pageNo}/${pdf.numPages}...`);
-          }
-        },
-      });
-
-      const pageFound = extractAwbFromOcr(result.data.text || "");
       allFound.push(...pageFound);
 
       const pct = Math.round((pageNo / pdf.numPages) * 100);
@@ -130,7 +121,7 @@ async function processPdf() {
       normalized = normalized.map((value) => value.replace(/^Q(?=[A-Z0-9])/i, ""));
     }
 
-    // Jaga agar yang diekspor benar-benar tampak seperti kode AWB.
+    // Filter kandidat AWB (Tanpa batas minimum, maks 18 karakter)
     normalized = normalized.filter(isLikelyAwb);
 
     if (dedupe.checked) {
@@ -144,7 +135,7 @@ async function processPdf() {
       showStatus(`Selesai. ${extractedAWBs.length} AWB ditemukan.`, "success");
     } else {
       showStatus(
-        "Belum ada AWB yang terbaca. Coba PDF dengan kualitas lebih jelas atau hasil export yang sama seperti template CORESYS.",
+        "Belum ada AWB yang terbaca. Coba PDF dengan kualitas lebih jelas atau hasil export CORESYS.",
         "error"
       );
     }
@@ -156,6 +147,73 @@ async function processPdf() {
   }
 }
 
+// Ekstraksi langsung Teks & Link Annotation bawaan PDF
+async function extractAwbDirect(page) {
+  const found = [];
+
+  // A. Ambil dari Hyperlink / Annotations (Link /detail_awb/XXXX) - Bebas panjang karakter
+  try {
+    const annotations = await page.getAnnotations();
+    for (const ann of annotations) {
+      if (ann.url) {
+        const match = ann.url.match(/detail_awb\/([A-Z0-9]+)/i);
+        if (match) found.push(match[1]);
+      }
+    }
+  } catch (e) {
+    console.warn("Gagal membaca annotations halaman:", e);
+  }
+
+  // B. Ambil dari Teks Digital PDF
+  try {
+    const textContent = await page.getTextContent();
+    const rawText = textContent.items.map((item) => item.str).join(" ");
+
+    // 1) Match URL detail_awb pada teks
+    const urlRegex = /detail_awb\/([A-Z0-9]+)/gi;
+    let m;
+    while ((m = urlRegex.exec(rawText)) !== null) {
+      found.push(m[1]);
+    }
+
+    // 2) Match kandidat AWB dari teks (bebas batas minimum hingga maks 18 karakter)
+    const awbRegex = /\b(Q?[A-Z0-9]{4,18})\b/gi;
+    while ((m = awbRegex.exec(rawText)) !== null) {
+      found.push(m[1]);
+    }
+  } catch (e) {
+    console.warn("Gagal membaca text content halaman:", e);
+  }
+
+  return found;
+}
+
+// Fallback OCR Tesseract untuk PDF berbasis gambar scan
+async function extractAwbViaOcr(page, pageNo, totalPages) {
+  const viewport = page.getViewport({ scale: 2.25 });
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  const result = await Tesseract.recognize(canvas, "eng", {
+    logger: (m) => {
+      if (m.status === "recognizing text" && typeof m.progress === "number") {
+        const pageBase = (pageNo - 1) / totalPages;
+        const pagePart = m.progress / totalPages;
+        const pct = Math.min(98, Math.round((pageBase + pagePart) * 100));
+        setProgress(pct, `OCR halaman ${pageNo}/${totalPages}...`);
+      }
+    },
+  });
+
+  const rawText = result.data.text || "";
+  return extractAwbFromOcr(rawText);
+}
+
 function extractAwbFromOcr(rawText) {
   const text = String(rawText || "")
     .replace(/[\u2018\u2019]/g, "'")
@@ -164,31 +222,27 @@ function extractAwbFromOcr(rawText) {
 
   const found = [];
 
-  // 1) Jalur utama: kode setelah /detail_awb/ pada hyperlink di kolom No. AWB.
-  const urlRegex = /DETAIL\s*[_\- ]?\s*AWB\s*[\\/]\s*([A-Z0-9]{12,22})/g;
+  // 1) Kode setelah /detail_awb/ (dengan toleransi typo OCR)
+  const urlRegex = /(?:DETAIL|DETALL|DETA1L|DEIAIL)\s*[_\- ]?\s*AWB\s*[\\/]\s*([A-Z0-9]+)/g;
   let match;
   while ((match = urlRegex.exec(text)) !== null) {
     found.push(match[1]);
   }
 
-  // 2) OCR kadang memecah '_' atau '/' menjadi spasi/tanda lain.
-  const looseUrlRegex = /DETAIL\s*[_\- ]?\s*AWB[^A-Z0-9]{0,8}([A-Z0-9]{12,22})/g;
+  // 2) OCR yang memecah tanda spasi / simbol
+  const looseUrlRegex = /(?:DETAIL|DETALL|DETA1L|DEIAIL)\s*[_\- ]?\s*AWB[^A-Z0-9]{0,8}([A-Z0-9]+)/g;
   while ((match = looseUrlRegex.exec(text)) !== null) {
     found.push(match[1]);
   }
 
-  // 3) Fallback: hanya baca bagian sesudah header tabel "No. AWB".
-  // Ini mengurangi risiko ikut mengambil daftar input "Masukan No." pada halaman pertama.
-  if (!found.length) {
-    const tableText = sliceAfterAwbHeader(text);
-    const lines = tableText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  // 3) Pembacaan pola AWB dari baris setelah header "No. AWB"
+  const tableText = sliceAfterAwbHeader(text);
+  const lines = tableText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
 
-    for (const line of lines) {
-      // Prioritaskan baris yang berisi URL/detail_awb.
-      if (/DETAIL|CORESYSSAP|ONLINE\./.test(line)) {
-        const candidates = line.match(/\bQ?[A-Z0-9]{14,18}\b/g) || [];
-        if (candidates.length) found.push(candidates[0]);
-      }
+  for (const line of lines) {
+    const candidates = line.match(/\bQ?[A-Z0-9]{4,18}\b/g) || [];
+    for (const cand of candidates) {
+      found.push(cand);
     }
   }
 
@@ -216,8 +270,20 @@ function cleanCandidate(value) {
 
 function isLikelyAwb(value) {
   if (!/^[A-Z0-9]+$/.test(value)) return false;
-  if (value.length < 14 || value.length > 18) return false;
-  if (/^(HTTPS|ONLINE|CORESYS|REFERENCE|DETAIL|TRACKING)/.test(value)) return false;
+  
+  // TANPA BATAS MINIMUM (hanya batasi maksimal 18 karakter agar No. Referensi 20 digit terfilter)
+  if (value.length > 18) return false;
+
+  // Daftar kata kunci teks UI / header tabel yang diabaikan
+  const ignoreList = [
+    "NO", "AWB", "POS", "PM", "AM", "PDF", "PAGE",
+    "HTTP", "HTTPS", "ONLINE", "CORESYS", "CORESYSSAP",
+    "REFERENCE", "REFERANCE", "DETAIL", "TRACKING",
+    "SATRIA", "ANTARAN", "PRIMA"
+  ];
+
+  if (ignoreList.includes(value)) return false;
+
   return true;
 }
 
