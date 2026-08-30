@@ -288,16 +288,20 @@ function cleanCandidate(value) {
 function isLikelyAwb(value) {
   if (!/^[A-Z0-9]+$/.test(value)) return false;
   
-  // TANPA BATAS MINIMUM (bisa 4, 5, 13 digit dst).
   // Maksimal 18 karakter agar No. Referensi (20 digit) tidak ikut masuk.
   if (value.length > 18) return false;
 
-  // Daftar kata kunci teks UI / header tabel yang diabaikan
+  // Daftar kata kunci teks UI / header tabel / noise OCR yang diabaikan secara spesifik
+  // AWB murni huruf (contoh: ABCDE, CGKXYZ) TETAP BISA KEBACA jika tidak ada di daftar kata UI ini.
   const ignoreList = [
     "NO", "AWB", "POS", "PM", "AM", "PDF", "PAGE",
     "HTTP", "HTTPS", "ONLINE", "CORESYS", "CORESYSSAP",
     "REFERENCE", "REFERANCE", "DETAIL", "TRACKING",
-    "SATRIA", "ANTARAN", "PRIMA"
+    "SATRIA", "ANTARAN", "PRIMA", "STATUS", "SEKTOR",
+    "SERVICE", "STYLE", "STATE", "SIZE", "FILE", "TYPE",
+    "DATE", "USER", "NAME", "INFO", "LIST", "NULL", "TRUE", "FALSE",
+    "SILE", "SLE", "STE", "S1E", "S1TE", "F1LE", "P4GE", "CARI",
+    "RIWAYAT", "MASUKAN", "BERDASARKAN"
   ];
 
   if (ignoreList.includes(value)) return false;
