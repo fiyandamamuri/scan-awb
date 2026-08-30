@@ -1,4 +1,4 @@
-/* global pdfjsLib, XLSX */
+/* global pdfjsLib, Tesseract, XLSX */
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -99,8 +99,14 @@ async function processPdf() {
 
       const page = await pdf.getPage(pageNo);
 
-      // Ekstrak langsung kode AWB dari struktur digital PDF (Instant 0.1 Detik)
-      const pageFound = await extractAwbDirect(page);
+      // 1. Ekstrak langsung jika PDF memiliki teks digital (Super Cepat 0.1 Detik)
+      let pageFound = await extractAwbDirect(page);
+
+      // 2. Jika PDF berupa gambar/scan murni (0 teks digital seperti file cek1.pdf), beralih ke OCR Tesseract
+      if (!pageFound.length && typeof Tesseract !== "undefined") {
+        pageFound = await extractAwbViaOcr(page, pageNo, pdf.numPages);
+      }
+
       allFound.push(...pageFound);
 
       const pct = Math.round((pageNo / pdf.numPages) * 100);
@@ -115,7 +121,7 @@ async function processPdf() {
       normalized = normalized.map((value) => value.replace(/^Q(?=[A-Z0-9])/i, ""));
     }
 
-    // Filter kandidat AWB (Tanpa batas minimum, maks 18 karakter)
+    // Filter kandidat AWB (Tanpa batas minimum, maks 18 karakter untuk membuang No. Referensi 20 digit)
     normalized = normalized.filter(isLikelyAwb);
 
     if (dedupe.checked) {
@@ -141,11 +147,11 @@ async function processPdf() {
   }
 }
 
-// Ekstraksi langsung kode AWB dari PDF (Hyperlink Link & Teks Digital PDF.js)
+// Ekstraksi langsung kode AWB dari PDF digital (Instant)
 async function extractAwbDirect(page) {
   const found = [];
 
-  // A. Sumber Utama: Ambil dari Hyperlink / Annotations URL (https://.../detail_awb/<KODE_AWB>)
+  // A. Ambil dari Hyperlink / Annotations URL (https://.../detail_awb/<KODE_AWB>)
   try {
     const annotations = await page.getAnnotations();
     for (const ann of annotations) {
@@ -158,7 +164,7 @@ async function extractAwbDirect(page) {
     console.warn("Gagal membaca annotations halaman:", e);
   }
 
-  // B. Sumber Kedua: Ambil dari Teks Digital PDF
+  // B. Ambil dari Teks Digital PDF
   try {
     const textContent = await page.getTextContent();
     const items = textContent.items.map((item) => item.str);
@@ -190,6 +196,88 @@ async function extractAwbDirect(page) {
   return found;
 }
 
+// Fallback OCR Tesseract untuk PDF berbasis gambar scan murni (seperti cek1.pdf 2.4MB)
+async function extractAwbViaOcr(page, pageNo, totalPages) {
+  const viewport = page.getViewport({ scale: 2.25 });
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  const result = await Tesseract.recognize(canvas, "eng", {
+    logger: (m) => {
+      if (m.status === "recognizing text" && typeof m.progress === "number") {
+        const pageBase = (pageNo - 1) / totalPages;
+        const pagePart = m.progress / totalPages;
+        const pct = Math.min(98, Math.round((pageBase + pagePart) * 100));
+        setProgress(pct, `OCR halaman ${pageNo}/${totalPages}...`);
+      }
+    },
+  });
+
+  const rawText = result.data.text || "";
+  return extractAwbFromOcr(rawText);
+}
+
+function extractAwbFromOcr(rawText) {
+  const text = String(rawText || "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .toUpperCase();
+
+  const found = [];
+
+  // 1) Ambil kode dari URL detail_awb pada OCR
+  const urlRegex = /(?:DETAIL|DETALL|DETA1L|DEIAIL)\s*[_\- ]?\s*AWB\s*[\\/]\s*([A-Z0-9]+)/g;
+  let match;
+  while ((match = urlRegex.exec(text)) !== null) {
+    found.push(match[1]);
+  }
+
+  // 2) OCR loose matching
+  const looseUrlRegex = /(?:DETAIL|DETALL|DETA1L|DEIAIL)\s*[_\- ]?\s*AWB[^A-Z0-9]{0,10}([A-Z0-9]+)/g;
+  while ((match = looseUrlRegex.exec(text)) !== null) {
+    found.push(match[1]);
+  }
+
+  // 3) Ambil kode berawalan Q dari tabel OCR (Q8161056107366 / QCGK8161070900011)
+  const qRegex = /\bQ([A-Z0-9]{3,18})\b/g;
+  while ((match = qRegex.exec(text)) !== null) {
+    found.push(match[1]);
+  }
+
+  // 4) Baris tabel sesudah "No. AWB"
+  const tableText = sliceAfterAwbHeader(text);
+  const lines = tableText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    // Ambil angka / kode AWB (11-16 digit angka atau kode cabang)
+    const candidates = line.match(/\b((?:CGK|[A-Z]{2,4})?[0-9]{11,16})\b/g) || [];
+    for (const cand of candidates) {
+      if (cand.length <= 18 && !/^(HTTPS|ONLINE|CORESYS|DETAIL|TRACKING|NO|AWB)/i.test(cand)) {
+        found.push(cand);
+      }
+    }
+  }
+
+  return found;
+}
+
+function sliceAfterAwbHeader(text) {
+  const variants = ["NO. AWB", "NO AWB", "NO, AWB", "NO.AWB"];
+  let bestIndex = -1;
+
+  for (const variant of variants) {
+    const index = text.lastIndexOf(variant);
+    if (index > bestIndex) bestIndex = index;
+  }
+
+  return bestIndex >= 0 ? text.slice(bestIndex) : text;
+}
+
 function cleanCandidate(value) {
   return String(value || "")
     .toUpperCase()
@@ -201,7 +289,7 @@ function isLikelyAwb(value) {
   if (!/^[A-Z0-9]+$/.test(value)) return false;
   
   // TANPA BATAS MINIMUM (bisa 4, 5, 13 digit dst).
-  // Hanya membatasi maksimal 18 karakter agar No. Referensi (20 digit) tidak ikut masuk.
+  // Maksimal 18 karakter agar No. Referensi (20 digit) tidak ikut masuk.
   if (value.length > 18) return false;
 
   // Daftar kata kunci teks UI / header tabel yang diabaikan
